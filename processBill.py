@@ -1,15 +1,24 @@
-import json, tempfile, gzip
+import io, sys, json, tempfile, gzip
+from datetime import datetime, timedelta
 import boto3, pandas as pd, numpy as np
 from tabulate import tabulate
-import io, sys
-from datetime import datetime, timedelta
 
 old_stdout = sys.stdout
 sys.stdout = io.StringIO()
 
 s3 = boto3.client('s3')
 sns = boto3.client('sns')
+
+DATEFORMAT = "%Y%m%d"
 BUCKET_NAME= "gw.ops"
+SNS_ARN = "arn:aws:sns:ap-south-1:975795997058:sns_MonthlyBillBreakup"
+# costandusagereports/MyCostAndUsageReport/20231201-20240101/
+REPORTPATHPREFIX = "costandusagereports/MyCostAndUsageReport"
+MANIFESTFILENAME = 'MyCostAndUsageReport-Manifest.json'
+COL_PRODUCTNAME = 'product/ProductName'
+COL_TAGPID = 'resourceTags/user:PID'
+COL_LINEITEMID = "identity/LineItemId"
+COL_COST = 'lineItem/UnblendedCost'
 
 def lambda_handler(event, context):
     #print("Received event: " + json.dumps(event, indent=2))
@@ -17,15 +26,14 @@ def lambda_handler(event, context):
     endDate = datetime.utcnow().replace(day=1)
     startDate = (endDate - timedelta(days=1)).replace(day=1)    
 
-    dateformat = "%Y%m%d"
-    # daterange = "20231201-20240101"
-    daterange = f"{startDate.strftime(dateformat)}-{endDate.strftime(dateformat)}"
-    filePath = f"costandusagereports/MyCostAndUsageReport/{daterange}/"
-    reportFileKey = ""
-
+    daterange = f"{startDate.strftime(DATEFORMAT)}-{endDate.strftime(DATEFORMAT)}"
+    filePath = f"{REPORTPATHPREFIX}/{daterange}/"
+    
+    reportFileKey = ""; df = ""
     with tempfile.TemporaryFile() as f_manifest:
-        print("Downloading manifest file", file=sys.stderr)
-        s3.download_fileobj(BUCKET_NAME, filePath + 'MyCostAndUsageReport-Manifest.json', f_manifest)
+        manifestFileKey = filePath + MANIFESTFILENAME
+        print(f"Downloading manifest file {manifestFileKey}", file=sys.stderr)        
+        s3.download_fileobj(BUCKET_NAME, manifestFileKey, f_manifest)
         print(f'{f_manifest.tell()} bytes received', file=sys.stderr)
         f_manifest.seek(0)
         h_manifest = json.load(f_manifest)
@@ -45,9 +53,9 @@ def lambda_handler(event, context):
 
         with gzip.open(f_gzip,'rt') as f:
             print("Reading into pivot table", file=sys.stderr)
-            df = pd.read_csv(f, index_col="identity/LineItemId").pivot_table(
-                index='product/ProductName', columns='resourceTags/user:PID', 
-                values='lineItem/UnblendedCost', fill_value=0, aggfunc='sum',
+            df = pd.read_csv(f, index_col=COL_LINEITEMID).pivot_table(
+                index=COL_PRODUCTNAME, columns=COL_TAGPID, 
+                values=COL_COST, fill_value=0, aggfunc='sum',
                 margins=True, dropna=False)
 
     # rename nan -to-> (blank)   This is the column where the PID is not tagged
@@ -57,19 +65,20 @@ def lambda_handler(event, context):
     df['(blank)']['All'] = df['(blank)'].sum()
 
     for col in df.columns:
-        if col == "product/ProductName" or col == "All":
+        if col == COL_PRODUCTNAME or col == "All":
             continue # with next column
 
         df1 = df[[col]].copy().round(2)
         df1.drop(df1[df1[col] == 0].index, inplace=True)
         if df1.shape[0] > 0:
+            print(f"# {col} $ {df1[col]['All']}", file=sys.stderr)
             print(tabulate(df1, headers='keys', tablefmt="simple"))
         else:
+            print(f"# {col} Insignificant", file=sys.stderr)
             print(f"{col} Insignificant")
         print()
     
     print("Pushing to SNS", file=sys.stderr)
-    reportTxt = sys.stdout.getvalue()
-    arn = "arn:aws:sns:ap-south-1:975795997058:sns_MonthlyBillBreakup"
-    response = sns.publish(TopicArn=arn, Message=reportTxt, Subject=f"AWS Bill Breakup {daterange}")
+    reportTxt = sys.stdout.getvalue()    
+    response = sns.publish(TopicArn=SNS_ARN, Message=reportTxt, Subject=f"AWS Bill Breakup {daterange}")
     print(response, file=sys.stderr)
