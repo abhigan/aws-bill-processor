@@ -3,8 +3,11 @@ from datetime import datetime, timedelta
 import boto3, pandas as pd, numpy as np
 from tabulate import tabulate
 
-old_stdout = sys.stdout
-sys.stdout = io.StringIO()
+ISLOCAL = True
+
+if not ISLOCAL:
+    old_stdout = sys.stdout
+    sys.stdout = io.StringIO()
 
 s3 = boto3.client('s3')
 sns = boto3.client('sns')
@@ -16,6 +19,7 @@ SNS_ARN = "arn:aws:sns:ap-south-1:975795997058:sns_MonthlyBillBreakup"
 REPORTPATHPREFIX = "costandusagereports/MyCostAndUsageReport"
 MANIFESTFILENAME = 'MyCostAndUsageReport-Manifest.json'
 COL_PRODUCTNAME = 'product/ProductName'
+COL_PRODUCTFAMILY = 'product/productFamily'
 COL_TAGPID = 'resourceTags/user:PID'
 COL_LINEITEMID = "identity/LineItemId"
 COL_COST = 'lineItem/UnblendedCost'
@@ -53,8 +57,8 @@ def lambda_handler(event, context):
 
         with gzip.open(f_gzip,'rt') as f:
             print("Reading into pivot table", file=sys.stderr)
-            df = pd.read_csv(f, index_col=COL_LINEITEMID).pivot_table(
-                index=COL_PRODUCTNAME, columns=COL_TAGPID, 
+            df = pd.read_csv(f, index_col=COL_LINEITEMID, low_memory=False).pivot_table(
+                index=[COL_PRODUCTNAME, COL_PRODUCTFAMILY], columns=COL_TAGPID, 
                 values=COL_COST, fill_value=0, aggfunc='sum',
                 margins=True, dropna=False)
 
@@ -71,14 +75,16 @@ def lambda_handler(event, context):
         df1 = df[[col]].copy().round(2)
         df1.drop(df1[df1[col] == 0].index, inplace=True)
         if df1.shape[0] > 0:
-            print(f"# {col} $ {df1[col]['All']}", file=sys.stderr)
+            print("="*50)
             print(tabulate(df1, headers='keys', tablefmt="simple"))
+        
         else:
             print(f"# {col} Insignificant", file=sys.stderr)
             print(f"{col} Insignificant")
         print()
     
-    print("Pushing to SNS", file=sys.stderr)
-    reportTxt = sys.stdout.getvalue()    
-    response = sns.publish(TopicArn=SNS_ARN, Message=reportTxt, Subject=f"AWS Bill Breakup {daterange}")
-    print(response, file=sys.stderr)
+    if not ISLOCAL:
+        print("Pushing to SNS", file=sys.stderr)
+        reportTxt = sys.stdout.getvalue()    
+        response = sns.publish(TopicArn=SNS_ARN, Message=reportTxt, Subject=f"AWS Bill Breakup {daterange}")
+        print(response, file=sys.stderr)
