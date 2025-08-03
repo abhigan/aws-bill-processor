@@ -1,5 +1,5 @@
 import io, sys, json, tempfile, gzip
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import boto3, pandas as pd, numpy as np
 from tabulate import tabulate
 
@@ -19,7 +19,7 @@ SNS_ARN = "arn:aws:sns:ap-south-1:975795997058:sns_MonthlyBillBreakup"
 REPORTPATHPREFIX = "costandusagereports/MyCostAndUsageReport"
 MANIFESTFILENAME = 'MyCostAndUsageReport-Manifest.json'
 COL_PRODUCTNAME = 'product/ProductName'
-COL_PRODUCTFAMILY = 'product/productFamily'
+COL_LINEITEMTYPE = 'lineItem/LineItemType'
 COL_TAGPID = 'resourceTags/user:PID'
 COL_LINEITEMID = "identity/LineItemId"
 COL_COST = 'lineItem/UnblendedCost'
@@ -27,7 +27,7 @@ COL_COST = 'lineItem/UnblendedCost'
 def lambda_handler(event, context):
     #print("Received event: " + json.dumps(event, indent=2))
 
-    endDate = datetime.utcnow().replace(day=1)
+    endDate = datetime.now(timezone.utc).replace(day=1)
     startDate = (endDate - timedelta(days=1)).replace(day=1)    
 
     daterange = f"{startDate.strftime(DATEFORMAT)}-{endDate.strftime(DATEFORMAT)}"
@@ -51,22 +51,22 @@ def lambda_handler(event, context):
     
     with tempfile.TemporaryFile() as f_gzip:
         print(f"Downloading report file {reportFileKey}", file=sys.stderr)
-        s3.download_fileobj(BUCKET_NAME, reportFileKey, f_gzip)        
+        s3.download_fileobj(BUCKET_NAME, reportFileKey, f_gzip)
         print(f'{f_gzip.tell()} bytes received', file=sys.stderr)
         f_gzip.seek(0)
 
         with gzip.open(f_gzip,'rt') as f:
             print("Reading into pivot table", file=sys.stderr)
             df = pd.read_csv(f, index_col=COL_LINEITEMID, low_memory=False).pivot_table(
-                index=[COL_PRODUCTNAME, COL_PRODUCTFAMILY], columns=COL_TAGPID, 
+                index=[COL_PRODUCTNAME, COL_LINEITEMTYPE], columns=COL_TAGPID, 
                 values=COL_COST, fill_value=0, aggfunc='sum',
                 margins=True, dropna=False)
 
-    # rename nan -to-> (blank)   This is the column where the PID is not tagged
-    df.rename(columns = {np.nan:'(blank)'}, inplace = True)
+    # rename nan -to-> (no-pid)   This is the column where the PID is not tagged
+    df.rename(columns = {np.nan:'(no-pid)'}, inplace = True)
 
-    # manually add Sum for (blank) column. pivot does not do that automatically
-    df['(blank)']['All'] = df['(blank)'].sum()
+    # manually add Sum for (no-pid) column. pivot does not do that automatically
+    df.loc['All', '(no-pid)'] = df['(no-pid)'].sum()
 
     for col in df.columns:
         if col == COL_PRODUCTNAME or col == "All":
