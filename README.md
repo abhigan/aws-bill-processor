@@ -1,6 +1,8 @@
 ## Setup Local
 
 ```bash
+$ python3 -m venv venv
+$ source venv/bin/activate
 $ brew install awscli
 $ aws configure
 ```

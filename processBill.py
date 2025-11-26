@@ -27,8 +27,8 @@ COL_COST = 'lineItem/UnblendedCost'
 def lambda_handler(event, context):
     #print("Received event: " + json.dumps(event, indent=2))
 
-    endDate = datetime.now(timezone.utc).replace(day=1)
-    startDate = (endDate - timedelta(days=1)).replace(day=1)    
+    endDate = datetime.now(timezone.utc).replace(day=1) # first day of the current month
+    startDate = (endDate - timedelta(days=1)).replace(day=1) # first day of the last month
 
     daterange = f"{startDate.strftime(DATEFORMAT)}-{endDate.strftime(DATEFORMAT)}"
     filePath = f"{REPORTPATHPREFIX}/{daterange}/"
@@ -36,9 +36,11 @@ def lambda_handler(event, context):
     reportFileKey = ""; df = ""
     with tempfile.TemporaryFile() as f_manifest:
         manifestFileKey = filePath + MANIFESTFILENAME
-        print(f"Downloading manifest file {manifestFileKey}", file=sys.stderr)        
-        s3.download_fileobj(BUCKET_NAME, manifestFileKey, f_manifest)
-        print(f'{f_manifest.tell()} bytes received', file=sys.stderr)
+        
+        print(f"DEBUG Downloading manifest file {manifestFileKey}", file=sys.stderr)        
+        s3.download_fileobj(BUCKET_NAME, manifestFileKey, f_manifest)        
+        print(f'DEBUG {f_manifest.tell()} bytes received', file=sys.stderr)
+
         f_manifest.seek(0)
         h_manifest = json.load(f_manifest)
 
@@ -50,13 +52,14 @@ def lambda_handler(event, context):
             reportFileKey = reportFileKeys[0]
     
     with tempfile.TemporaryFile() as f_gzip:
-        print(f"Downloading report file {reportFileKey}", file=sys.stderr)
+        print(f"DEBUG Downloading report file {reportFileKey}", file=sys.stderr)
         s3.download_fileobj(BUCKET_NAME, reportFileKey, f_gzip)
-        print(f'{f_gzip.tell()} bytes received', file=sys.stderr)
+        print(f'DEBUG {f_gzip.tell()} bytes received', file=sys.stderr)
+
         f_gzip.seek(0)
 
         with gzip.open(f_gzip,'rt') as f:
-            print("Reading into pivot table", file=sys.stderr)
+            print("DEBUG Reading into pivot table", file=sys.stderr)
             df = pd.read_csv(f, index_col=COL_LINEITEMID, low_memory=False).pivot_table(
                 index=[COL_PRODUCTNAME, COL_LINEITEMTYPE], columns=COL_TAGPID, 
                 values=COL_COST, fill_value=0, aggfunc='sum',
@@ -68,20 +71,25 @@ def lambda_handler(event, context):
     # manually add Sum for (no-pid) column. pivot does not do that automatically
     df.loc['All', '(no-pid)'] = df['(no-pid)'].sum()
 
+    insignificants = []
+
     for col in df.columns:
         if col == COL_PRODUCTNAME or col == "All":
             continue # with next column
 
-        df1 = df[[col]].copy().round(2)
-        df1.drop(df1[df1[col] == 0].index, inplace=True)
-        if df1.shape[0] > 0:
-            print("="*50)
+        df1 = df[[col]].copy().round(2) # make a copy to avoid SettingWithCopyWarning
+        df1.drop(df1[df1[col] == 0].index, inplace=True) # drop zero cost rows
+
+        if df1.shape[0] > 0: # has some data            
+            print("="*60)
             print(tabulate(df1, headers='keys', tablefmt="simple"))
         
         else:
-            print(f"# {col} Insignificant", file=sys.stderr)
-            print(f"{col} Insignificant")
+            insignificants.append(col)
         print()
+
+    if len(insignificants) > 0:
+        print("Insignificant PIDs (zero cost):", ", ".join(insignificants))    
     
     if not ISLOCAL:
         print("Pushing to SNS", file=sys.stderr)
