@@ -81,7 +81,7 @@ def lambda_handler(event, context):
         df1.drop(df1[df1[col] == 0].index, inplace=True) # drop zero cost rows
 
         if df1.shape[0] > 0: # has some data            
-            print("="*60)
+            print("="*60) # the =========== separator line
             print(tabulate(df1, headers='keys', tablefmt="simple"))
         
         else:
